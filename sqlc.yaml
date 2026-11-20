@@ -1,0 +1,27 @@
+# version of this config file's format, not of sqlc itself
+# "2" uses the sql/gen layout below, "1" uses the older `packages:` layout (mixing them errors out)
+version: "2"
+sql:
+    # which sql dialect to parse the schema and queries as (postgresql, mysql or sqlite)
+  - engine: "postgresql"
+    # where my queries live; each one needs a `-- name: QueryName :one/:many/:exec/...` comment on top
+    queries: "./db/query/"
+    # where the table definitions come from; sqlc reads the migration files, not the running db
+    schema: "./db/migrations/"
+    gen:
+      # generate go code (other languages like python, kotlin, typescript need plugins)
+      go:
+        # the `package db` line in the generated files, so my code calls db.New(), db.Account etc.
+        package: "db"
+        # folder the generated files are written to
+        out: "./db/sqlc"
+        # adds json tags to struct fields, e.g. Owner string `json:"owner"`
+        emit_json_tags: true
+        # true adds a Prepare() that sends every query to postgres once up front so it's parsed and planned ahead,
+        # false sends each query fresh every call (both are safe from sql injection since values go in as $1, $2...)
+        emit_prepared_queries: false
+        # true generates a Querier interface listing every query method, handy for mocking the db in tests
+        emit_interface: false
+        # false singularizes table names into struct names (accounts -> Account),
+        # true keeps them exact (accounts -> Accounts), which reads oddly for a single row
+        emit_exact_table_names: false

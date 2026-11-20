@@ -1,0 +1,22 @@
+# claude code notes and tickets for this project (local only)
+.claude/
+CLAUDE.local.md
+
+# secrets / local env files
+.env
+.env.*
+
+# go build output: binaries, test binaries, coverage reports
+/bin/
+/bmc
+/main
+*.exe
+*.test
+*.out
+coverage.html
+
+# os and editor files
+.DS_Store
+.vscode/
+.idea/
+.zed/
