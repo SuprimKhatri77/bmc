@@ -70,7 +70,7 @@ type TransferTxResult struct {
 	ToEntry     Entry    `json:"to_entry"`
 }
 
-// TransferTx moves money from one account to another
+// TransactionTx moves money from one account to another
 // it creates a transfer record, adds an entry for each account and updates both balances,
 // all in one database transaction, so either every step is saved or none of them is
 func (store *Store) TransactionTx(ctx context.Context, arg TransferTxParams) (TransferTxResult, error) {
@@ -113,33 +113,47 @@ func (store *Store) TransactionTx(ctx context.Context, arg TransferTxParams) (Tr
 			return err
 		}
 
-		// 4. take the money out of the sender: one UPDATE (balance = balance + amount) with a negative amount
-		// it reads and changes the balance in the same statement, and the UPDATE locks the row until commit,
-		// so a concurrent transfer on this account waits instead of reading a stale balance
-		// (no separate SELECT ... FOR NO KEY UPDATE needed anymore)
-		result.FromAccount, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
-			ID:     arg.FromAccountID,
-			Amount: -arg.Amount,
-		})
-		if err != nil {
-			return err
+		// 4. update both balances, always locking the account with the smaller ID first
+		// each UPDATE locks its row until commit; if A->B locked A first while B->A locked B first,
+		// each would wait for the row the other holds (deadlock). With one fixed order, both go for
+		// the same row first, so one simply waits for the other to finish.
+		// the order only decides which row is locked first; the signs (-amount / +amount) decide
+		// where the money goes, so the sender still loses money and the receiver still gains it
+		if arg.FromAccountID < arg.ToAccountID {
+			// sender has the smaller ID: take money out of the sender first, then pay the receiver
+			result.FromAccount, result.ToAccount, err = addMoney(ctx, q, arg.FromAccountID, -arg.Amount, arg.ToAccountID, arg.Amount)
+		} else {
+			// receiver has the smaller ID: pay the receiver first, then take money out of the sender
+			// addMoney returns the accounts in the order they were passed, so the receiver comes back first
+			result.ToAccount, result.FromAccount, err = addMoney(ctx, q, arg.ToAccountID, arg.Amount, arg.FromAccountID, -arg.Amount)
 		}
 
-		// 5. put the money into the receiver (positive amount)
-		// note: two transfers in opposite directions (A->B and B->A at the same time) can still deadlock here,
-		// each holding the row lock the other one needs next
-		result.ToAccount, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
-			ID:     arg.ToAccountID,
-			Amount: arg.Amount,
-		})
-		if err != nil {
-			return err
-		}
-
-		// nil tells execTx everything worked, so it commits
-		return nil
+		// nil: execTx commits; an error from addMoney: execTx rolls everything back
+		return err
 	})
 
 	// err is nil if committed, or the error that caused the rollback
 	return result, err
+}
+
+// addMoney adds amount1 to account 1, then amount2 to account 2, in that order (a negative amount takes money out)
+// each AddAccountBalance is a single UPDATE (balance = balance + amount), so it reads and changes the balance in one
+// statement and locks the row until commit: a concurrent transfer on that account waits instead of reading a
+// stale balance (no separate SELECT ... FOR NO KEY UPDATE needed)
+// named results: a bare return sends back whatever account1, account2 and err hold at that point
+func addMoney(ctx context.Context, q *Queries, accountID1 int64, amount1 int64, accountID2 int64, amount2 int64) (account1 Account, account2 Account, err error) {
+	account1, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
+		ID:     accountID1,
+		Amount: amount1,
+	})
+	if err != nil {
+		return
+	}
+
+	account2, err = q.AddAccountBalance(ctx, AddAccountBalanceParams{
+		ID:     accountID2,
+		Amount: amount2,
+	})
+
+	return
 }
