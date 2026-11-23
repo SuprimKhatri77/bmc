@@ -1,5 +1,16 @@
+# GitHub Actions workflow: on every push / PR to main, start a fresh Linux machine, give it a Postgres,
+# run the migrations and run the Go tests. If any step fails, the run (and the PR check) goes red.
+#
+# shape of the file:
+#   name  -> what the workflow is called in the Actions tab
+#   on    -> which events start it
+#   jobs  -> what to do; each job runs on its own fresh machine, in parallel with other jobs
+#     <job id>  -> runs-on (which machine), services (containers next to it), steps (in order, on that machine)
+
+# shown in the Actions tab and on the PR checks list
 name: ci-test
 
+# when to run: a push to main, or a PR that targets main (the PR run tests the PR's code before merging)
 on:
   push:
     branches: [main]
@@ -7,46 +18,79 @@ on:
     branches: [main]
 
 jobs:
+  # "test" is the job id (used to refer to the job, e.g. needs: test); "name" is the label shown in the UI
   test:
     name: Test
+    # a brand-new Ubuntu VM hosted by GitHub, thrown away after the run: nothing from my laptop is on it,
+    # so anything the steps need (Go, migrate, the code itself) has to be installed or fetched by a step
     runs-on: ubuntu-latest
 
+    # containers GitHub starts before the first step and stops after the last one
     services:
+      # "postgres" is just a label for this service container
       postgres:
+        # the Docker image as name:tag (postgres17 is the container *name* from the Makefile, not an image,
+        # which is why "image: postgres17" failed with "pull access denied")
         image: postgres:17
 
+        # env vars for the container: the official postgres image reads these on first start
+        # to create the user, set its password and create the bmc database
         env:
           POSTGRES_PASSWORD: secret
           POSTGRES_USER: root
           POSTGRES_DB: bmc
 
+        # extra flags for `docker create`. >- is a YAML "folded" block: the lines below are joined with spaces
+        # into one string and the trailing newline is dropped, i.e.
+        #   --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+        # the health check makes GitHub wait until Postgres accepts connections before running the steps
+        # (no comments inside the block itself: they'd become part of the string)
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
+        # host port:container port. The steps run on the VM itself, not in a container, so they reach
+        # Postgres through the VM's localhost:5433, the same address as on my laptop (Makefile DB_URL,
+        # dbSource in main_test.go). Without this mapping nothing listens on localhost:5433.
         ports:
           - 5433:5432
 
+    # run one after another on the same VM, sharing its files; the first failing step stops the job
+    # each step either "uses" a ready-made action (someone else's code, configured with "with")
+    # or "run"s shell commands; "name" is only the label in the log
     steps:
+      # an action that downloads Go (or takes it from the VM's tool cache) and puts it on PATH
+      # with: the action's inputs, here which Go version to install
+      # id: a handle so later steps could read this step's outputs (steps.go.outputs...); nothing uses it yet
       - name: Set up Go 1.27.3
         uses: actions/setup-go@v2
         with:
           go-version: 1.27.3
         id: go
 
+      # an action that clones this repo (the commit being tested) into the VM's working directory
+      # it doesn't install anything: Go came from setup-go above
       - name: Check out code into the Go module directory
         uses: actions/checkout@v2
 
+      # the VM has no migrate CLI, so download the release and put it on PATH
+      # | is a YAML "literal" block: newlines are kept, so each line is its own shell command
+      # (the run uses bash -e, so it stops at the first line that fails)
+      # curl -L follows GitHub's redirect to the real file; tar xvz extracts the .tar.gz from stdin (v = list files)
+      # the archive contains LICENSE, README.md and a binary called "migrate" (older releases called it
+      # migrate.linux-amd64), which gets moved onto PATH; which migrate prints where it landed
       - name: Install golang-migrate
         run: |
           curl -L https://github.com/golang-migrate/migrate/releases/download/v4.20.1/migrate.linux-amd64.tar.gz | tar xvz
           sudo mv migrate /usr/bin/migrate
           which migrate
 
+      # create the tables in the CI database (make reads the Makefile from the checked-out code)
       - name: Run migration
         run: make migrateup
 
+      # go test -v -cover ./... against the CI database
       - name: test
         run: make test
